@@ -1,8 +1,51 @@
-# Multi-Agent SQL & Data Analyst
+# AskMyData
 
-Ask a plain-English business question, get a SQL query, a verified
-result, and a chart — built as four small agents coordinated by
-LangGraph instead of one big script.
+**Ask a plain-English business question. Get back a SQL query, a verified
+result, a chart, and a written answer.**
+
+AskMyData is a small multi-agent data analyst built with
+[LangGraph](https://github.com/langchain-ai/langgraph): four single-purpose
+agents — write SQL, run &amp; verify it, chart it, summarize it — coordinated
+as a graph instead of one large prompt. A failed query loops back and
+retries with the error attached, and a fix that worked once is remembered
+so the same mistake isn't repeated on a different question later.
+
+🔗 **Live demo:** _add your Streamlit Community Cloud URL here after deploying (see below)_
+
+```
+Q: "top 3 products by revenue"
+
+  → SELECT p.name, SUM(oi.quantity * p.price) AS revenue
+    FROM order_items oi
+    JOIN products p ON oi.product_id = p.product_id
+    GROUP BY p.name ORDER BY revenue DESC LIMIT 3;
+
+  → Mechanical Keyboard   $239.96
+    Wireless Mouse         $99.95
+    Webcam HD               $90.00
+
+  → "The top 3 products by revenue are the Mechanical Keyboard ($239.96),
+     Wireless Mouse ($99.95), and Webcam HD ($90.00)."
+```
+
+## Features
+
+- **Plain-English → SQL** — no query language to learn; the schema is
+  introspected live from SQLite, never hardcoded, so it can't hallucinate a
+  column that doesn't exist.
+- **Self-correcting** — a failed query's error is fed back to the SQL
+  writer, up to 2 retries, before the pipeline gives up cleanly.
+- **Cross-run memory** — once a retry fixes a mistake, that (question,
+  error, fix) is logged and resurfaced on future similar questions, so the
+  *first* attempt avoids it instead of needing its own retry.
+- **Guardrailed execution** — only a single read-only `SELECT` is ever run;
+  `DROP`/`DELETE`/`UPDATE`/`INSERT`/`ALTER`/etc. and stacked statements are
+  rejected before they reach the database.
+- **Auto-charted results** — bar or line, picked from the shape of the
+  result, no chart config needed.
+- **Two interchangeable LLM backends** — OpenAI (`gpt-4o-mini`) for
+  accuracy, or a free local model via Ollama (`llama3.2:3b`) — one line in
+  `.env`, no code changes.
 
 ## Architecture
 
@@ -27,40 +70,41 @@ LangGraph instead of one big script.
                        END  <───────────────────────────────┘
 ```
 
-- **`generate_sql`** — writes a SQLite `SELECT` from the question, the
-  database's live schema (introspected on every call, see
-  `database/schema.py` — never hardcoded, so it can't hallucinate a
-  column that doesn't exist), and, on retry, the previous error.
-- **`execute_sql`** — the guardrail: rejects anything that isn't a single
-  read-only `SELECT` (whole-word block on DROP/DELETE/UPDATE/INSERT/
-  ALTER/CREATE/TRUNCATE/etc., and no stacked statements), runs it, and
-  reports back success or an error.
-- **`generate_chart`** — no LLM needed here; picks bar vs. line based on
-  the shape of the result and builds a Plotly figure.
-- **`summarize`** — writes a short plain-English answer from the data.
-
-The retry loop between `generate_sql` and `execute_sql` is the "self
--correcting" part — if the SQL fails, the error goes back to Agent 1
-with context, up to 2 retries, before the pipeline gives up cleanly.
+| Agent | File | Calls an LLM? | Job |
+|---|---|---|---|
+| 1. `generate_sql` | `agents/sql_generator.py` | Yes | Writes one SQLite `SELECT` from the question, the live schema, domain notes, and (on retry) the previous error + similar past fixes |
+| 2. `execute_sql` | `agents/sql_executor.py` | No | Blocks anything but a single read-only `SELECT`, runs it, reports success/error, logs fixes to memory |
+| 3. `generate_chart` | `agents/chart_generator.py` | No | Picks bar vs. line from the result's shape and builds a Plotly figure |
+| 4. `summarize` | `agents/summarizer.py` | Yes | Writes a 1–3 sentence plain-English answer from the data |
 
 **Meta-error memory** (`agents/error_memory.py`): whenever a retry
 succeeds, the (wrong SQL, error, fixed SQL) triple is logged to
-`database/error_memory.json`. On every new question, the most similar
-past fixes are pulled back into Agent 1's prompt — so a mistake made on
-one question doesn't get repeated on a *different* but similar question
-in a later run, without needing its own retry first.
+`database/error_memory.json`. On every new question, the most similar past
+fixes are pulled back into Agent 1's prompt — so a mistake made on one
+question doesn't get repeated on a *different* but similar question in a
+later run, without needing its own retry first.
 
-## Setup
+Full write-up (including a diagram of the retry/memory loops and a
+quantitative breakdown of the codebase) is in
+[`PROJECT_REPORT.txt`](PROJECT_REPORT.txt).
+
+## Tech stack
+
+`langgraph` · `langchain` (+ `langchain-openai` / `langchain-ollama`) ·
+`streamlit` · `sqlite3` · `pandas` · `plotly`
+
+## Getting started
 
 ```bash
+git clone https://github.com/samruddhivkore-prog/AskMyData.git
+cd AskMyData
+
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env            # then paste your OpenAI key into .env
-
-python database/init_db.py      # creates the sample SQLite database
-streamlit run app.py
+streamlit run app.py            # sample database is created automatically on first run
 ```
 
 Try questions like:
@@ -68,7 +112,7 @@ Try questions like:
 - "Which 3 customers spent the most?"
 - "How many orders came from Ireland?"
 
-## Using a free local model instead of OpenAI
+### Using a free local model instead of OpenAI
 
 Both LLM-calling agents (`sql_generator.py`, `summarizer.py`) get their
 model from `agents/llm.py`, which picks the backend based on `.env` — no
@@ -76,8 +120,8 @@ code changes needed:
 
 1. Install [Ollama](https://ollama.com) and run `ollama pull llama3.2:3b`
    (don't just run bare `ollama` — its interactive picker defaults to
-   showing cloud-hosted models, which need sign-in/billing and aren't
-   what you want here)
+   showing cloud-hosted models, which need sign-in/billing and aren't what
+   you want here)
 2. Make sure the Ollama app/service is running
 3. In `.env`, set:
    ```
@@ -97,16 +141,60 @@ multi-join or aggregation-heavy questions with `llama3.2:3b` than with
 OpenAI. If it's struggling, `ollama pull llama3.1:8b` and set
 `LLM_MODEL=llama3.1:8b` for a stronger (larger, slower) local option.
 
-## Next steps to make this a strong portfolio piece
+## Deploying
 
-1. **Deploy it** — [Streamlit Community Cloud](https://streamlit.io/cloud)
-   or [Hugging Face Spaces](https://huggingface.co/spaces) both have free
-   tiers; either turns this into a link a recruiter can actually click.
-2. **Push to GitHub** — `git init`, commit, and write a good top-level
-   README (this one's a start) with a screenshot or short GIF of it running.
-3. **Extend it** — swap the sample database for something you know well
-   (e.g. your O-RAN dataset), or add a 5th agent that catches ambiguous
-   questions and asks a clarifying one before generating SQL.
-4. **Add a couple of automated tests** for `sql_executor.py`'s guardrail
-   (confirm it actually blocks `DROP TABLE` etc.) — a small `tests/`
-   folder with 3-4 test cases signals production thinking, not just a demo.
+The app is ready to deploy as-is to **[Streamlit Community
+Cloud](https://share.streamlit.io)** (free):
+
+1. Push this repo to GitHub (already done if you're reading this there).
+2. Go to [share.streamlit.io](https://share.streamlit.io) → sign in with
+   GitHub → **New app**.
+3. Pick this repo, branch `main`, main file path `app.py`.
+4. Under **Advanced settings → Secrets**, paste:
+   ```toml
+   LLM_PROVIDER = "openai"
+   OPENAI_API_KEY = "sk-..."
+   ```
+   (Ollama can't run on a free cloud host — it needs a local model server —
+   so the deployed app always uses OpenAI regardless of what `.env` says
+   locally. `app.py` bridges these secrets into the environment
+   automatically, the same way `.env` works locally.)
+5. **Deploy.** The sample SQLite database is generated automatically on
+   first run (see `app.py`), so no build step is needed.
+
+Paste the resulting `*.streamlit.app` URL into the **Live demo** line at
+the top of this README.
+
+## Project structure
+
+```
+AskMyData/
+├── app.py                    Streamlit front end
+├── graph.py                  builds & runs the LangGraph pipeline
+├── requirements.txt
+├── PROJECT_REPORT.txt        detailed write-up: architecture, quantitative stats, roadmap
+├── agents/
+│   ├── state.py               shared AgentState schema
+│   ├── llm.py                 picks OpenAI vs. Ollama from .env / st.secrets
+│   ├── sql_generator.py       Agent 1
+│   ├── sql_executor.py        Agent 2
+│   ├── chart_generator.py     Agent 3
+│   ├── summarizer.py          Agent 4
+│   └── error_memory.py        cross-run fix log
+└── database/
+    ├── init_db.py             creates & seeds the sample database
+    └── schema.py               live schema introspection
+```
+
+## Known limitations & roadmap
+
+- No automated tests yet for the SQL guardrail — a `tests/` folder proving
+  it blocks `DROP TABLE` etc. is the next thing to add.
+- Small local models underperform GPT-4o-mini on complex joins (see
+  above).
+- Single SQLite file, single user — no auth, no concurrent-write handling.
+- Next: swap the sample dataset for a real one (e.g. an O-RAN dataset), and
+  add a 5th agent that catches an ambiguous question and asks a clarifying
+  one before generating SQL.
+
+See [`PROJECT_REPORT.txt`](PROJECT_REPORT.txt) for the full breakdown.

@@ -13,6 +13,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# On Streamlit Community Cloud, config lives in st.secrets rather than a
+# local .env file — mirror it into the environment so agents/llm.py (which
+# just calls os.getenv) works the same way in both places.
+try:
+    for _key in ("LLM_PROVIDER", "OPENAI_API_KEY", "LLM_MODEL"):
+        if _key in st.secrets and not os.getenv(_key):
+            os.environ[_key] = st.secrets[_key]
+except Exception:
+    pass
+
+# The sample database is gitignored (it's generated, not source) and the
+# cloud filesystem is ephemeral, so recreate it on cold start if missing.
+_DB_PATH = os.path.join(os.path.dirname(__file__), "database", "company.db")
+if not os.path.exists(_DB_PATH):
+    from database.init_db import create_and_seed
+
+    create_and_seed()
+
 st.set_page_config(page_title="Multi-Agent SQL Analyst", layout="wide")
 st.title(" Multi-Agent SQL & Data Analyst")
 st.caption(
